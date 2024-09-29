@@ -1,0 +1,102 @@
+;
+; WinNVMe.inf
+;
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=Sample ; TODO: edit Class
+ClassGuid={78A1C341-4539-11d3-B88D-00C04FAD5171} ; TODO: edit ClassGuid
+Provider=%ManufacturerName%
+CatalogFile=WinNVMe.cat
+DriverVer = 08/11/2024,15.17.4.758
+PnpLockDown=1
+
+[DestinationDirs]
+DefaultDestDir = 12
+WinNVMe_Device_CoInstaller_CopyFiles = 11
+
+; ================= Class section =====================
+
+[ClassInstall32]
+Addreg=SampleClassReg
+
+[SampleClassReg]
+HKR,,,0,%ClassName%
+HKR,,Icon,,-5
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+WinNVMe.sys  = 1,,
+;
+
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName%=Standard,NTamd64
+
+[Standard.NTamd64]
+%WinNVMe.DeviceDesc%=WinNVMe_Device, PCI\CC_010802 ; TODO: edit hw-id
+
+[WinNVMe_Device.NT]
+CopyFiles=Drivers_Dir
+
+[WinNVMe_Device.NT.HW]
+AddReg = Stornvme_Inst_HW_AddReg
+
+[Drivers_Dir]
+WinNVMe.sys
+
+[Stornvme_Inst_HW_AddReg]
+HKR,"Interrupt Management",,0x00000010
+HKR,"Interrupt Management\MessageSignaledInterruptProperties",,0x00000010
+HKR,"Interrupt Management\MessageSignaledInterruptProperties","MSISupported",0x00010001,1
+HKR,"Interrupt Management\GroupPolicy",,0x00010001,1
+HKR, Interrupt Management\MessageSignaledInterruptProperties, MessageNumberLimit, 0x00010001,   9
+
+
+;-------------- Service installation
+[WinNVMe_Device.NT.Services]
+AddService = WinNVMe,%SPSVCINST_ASSOCSERVICE%, WinNVMe_Service_Inst
+
+; -------------- WinNVMe driver install sections
+[WinNVMe_Service_Inst]
+DisplayName    = %WinNVMe.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\WinNVMe.sys
+
+;
+;--- WinNVMe_Device Coinstaller installation ------
+;
+
+[WinNVMe_Device.NT.CoInstallers]
+AddReg=WinNVMe_Device_CoInstaller_AddReg
+CopyFiles=WinNVMe_Device_CoInstaller_CopyFiles
+
+[WinNVMe_Device_CoInstaller_AddReg]
+;
+
+
+[WinNVMe_Device_CoInstaller_CopyFiles]
+;
+
+
+[WinNVMe_Device.NT.Wdf]
+KmdfService =  WinNVMe, WinNVMe_wdfsect
+[WinNVMe_wdfsect]
+KmdfLibraryVersion = 1.15
+
+[Strings]
+SPSVCINST_ASSOCSERVICE= 0x00000002
+ManufacturerName="<Your manufacturer name>" ;TODO: Replace with your manufacturer name
+ClassName="Samples" ; TODO: edit ClassName
+DiskName = "WinNVMe Installation Disk"
+WinNVMe.DeviceDesc = "WinNVMe Device"
+WinNVMe.SVCDESC = "WinNVMe Service"
+REG_DWORD              = 0x00010001
