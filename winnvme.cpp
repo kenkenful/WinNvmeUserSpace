@@ -1,7 +1,7 @@
-﻿#include <ntddk.h>
+﻿#define NT_PROCESSOR_GROUPS
+#include <ntddk.h>
 #include <wdm.h>
 #include<ntstrsafe.h>
-
 #include "nvme.h"
 
 #define EVENTNAMEMAXLEN	100
@@ -14,7 +14,9 @@
 #define	IOCTL_WINNVME_UNALLOCATE_DMA_MEMORY	CTL_CODE(FILE_DEVICE_WINNVME, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define	IOCTL_WINNVME_TEST						CTL_CODE(FILE_DEVICE_WINNVME, 0x804,	METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
-#define IOCTL_WINNVME_CLEAR_EVENT		CTL_CODE(FILE_DEVICE_WINNVME, 0x805,	METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
+
+#define IOCTL_WINNVME_CLEAR_ADMIN_EVENT		CTL_CODE(FILE_DEVICE_WINNVME, 0x805,	METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
+#define IOCTL_WINNVME_CLEAR_IO_EVENT		CTL_CODE(FILE_DEVICE_WINNVME, 0x806,	METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
 
 
 
@@ -24,6 +26,8 @@
 #define DEVICE_SYMLINKNAME	( L"\\DosDevices\\WINNVME" )
 
 UINT8 gucDeviceCounter;
+
+LONGLONG io_qid = 1;
 
 typedef struct tagWINMEM
 {
@@ -62,7 +66,7 @@ typedef struct _DEVICE_EXTENSION
 	PDEVICE_OBJECT		NextStackDevice;
 	UNICODE_STRING	ustrDeviceName;    
 	UNICODE_STRING	ustrSymLinkName;  
-	PVOID							InterruptObject;
+	struct _KINTERRUPT*		InterruptObject;
 
 	BOOLEAN					bInterruptEnable;
 
@@ -78,32 +82,49 @@ typedef struct _DEVICE_EXTENSION
 
 	u32*							admin_sq_doorbell;
 	u32*							admin_cq_doorbell;
-
 	int								admin_sq_tail ;
 	int								admin_cq_head ;
 	int								admin_cq_phase;
-
 	int								admin_sq_size;       ///< queue size
 	int								admin_cq_size;       ///< queue size
+	nvme_sq_entry_t*	admin_sq_entry;
+	nvme_cq_entry_t*	admin_cq_entry;
+	MEMORY					admin_sq;
+	MEMORY					admin_cq;
 
-	nvme_sq_entry_t*	sq;
-	nvme_cq_entry_t*	cq;
+
+	u32*							io_sq_doorbell;
+	u32*							io_cq_doorbell;
+	int								io_sq_tail;
+	int								io_cq_head;
+	int								io_cq_phase;
+	int								io_sq_size;       ///< queue size
+	int								io_cq_size;       ///< queue size
+	nvme_sq_entry_t*	io_sq_entry;
+	nvme_cq_entry_t*	io_cq_entry;
+	MEMORY					io_sq;
+	MEMORY					io_cq;
+
 
 	_DMA_ADAPTER*   dmaAdapter;
 	ULONG						NumOfMappedRegister;
 
-	MEMORY					admin_sq;
-	MEMORY					admin_cq;
 	MEMORY					data_buffer;
 
-	HANDLE						handle;
-	PKEVENT					Event;
+	HANDLE						adminHandle;
+	PKEVENT					adminEvent;
+
+	HANDLE						ioHandle;
+	PKEVENT					ioEvent;
 
 	UINT8							DeviceCounter;
 
 	SINGLE_LIST_ENTRY lstMapInfo;
 	SINGLE_LIST_ENTRY lstDMAMapInfo;
 
+	LONG							InterruptCount;
+
+	ULONG						IsrType;
 
 } DEVICE_EXTENSION, * PDEVICE_EXTENSION;
 
@@ -145,19 +166,18 @@ MSI_ISR(
 {
 	UNREFERENCED_PARAMETER(Interrupt);
 
-	DbgPrint("Interrupt Occured: %d\n", MessageId);
+	//DbgPrint("Interrupt Occured: %d\n", MessageId);
 
 	PDEVICE_EXTENSION p = (PDEVICE_EXTENSION)ServiceContext;
 	
 	if (MessageId == 0) {
-	//	IoRequestDpc(p->fdo, NULL, p);
-
-		KeSetEvent(p->Event, IO_NO_INCREMENT, FALSE);    
-
 		nvme_cq_entry_t* admin_cq = (nvme_cq_entry_t*)p->admin_cq.pvk;
 
 		if (admin_cq[p->admin_cq_head].u.a.p == p->admin_cq_phase) {
 			while (admin_cq[p->admin_cq_head].u.a.p == p->admin_cq_phase) {
+				InterlockedIncrement(&p->InterruptCount);
+				IoRequestDpc(p->fdo, NULL, p);
+
 				//int head = p->admin_cq_head;
 				if (++p->admin_cq_head == p->admin_cq_size) {
 					p->admin_cq_head = 0;
@@ -170,6 +190,24 @@ MSI_ISR(
 	}
 	else {
 	
+		nvme_cq_entry_t* io_cq = (nvme_cq_entry_t*)p->io_cq.pvk;
+
+		if (io_cq[p->io_cq_head].u.a.p == p->io_cq_phase) {
+			while (io_cq[p->io_cq_head].u.a.p == p->io_cq_phase) {
+				InterlockedIncrement(&p->InterruptCount);
+
+				IoRequestDpc(p->fdo, NULL, p);
+
+				//int head = p->admin_cq_head;
+				if (++p->io_cq_head == p->io_cq_size) {
+					p->io_cq_head = 0;
+					p->io_cq_phase = !p->io_cq_phase;
+				}
+
+				*(volatile u32*)(p->io_cq_doorbell) = p->io_cq_head;
+			}
+		}
+
 
 	}
 
@@ -202,9 +240,9 @@ VOID DPC(
 
 	PDEVICE_EXTENSION p = (PDEVICE_EXTENSION)context;
 
-	DbgPrint("dpc\n");
+	DbgPrint("Interrupt: %d\n", p->InterruptCount);
 
-	KeSetEvent(p->Event, IO_NO_INCREMENT, FALSE);    
+	KeSetEvent(p->adminEvent, IO_NO_INCREMENT, FALSE);    
 
 	return;
 }
@@ -240,12 +278,14 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 	pdx->PhyDevice = PhysicalDeviceObject;
 	pdx->DeviceCounter = gucDeviceCounter;
 
-	pdx->handle = nullptr;
+	pdx->adminHandle = nullptr;
+	pdx->ioHandle = nullptr;
+
 	
 	pdx -> lstMapInfo.Next = nullptr;
 	pdx -> lstDMAMapInfo.Next = nullptr;
 
-	//IoInitializeDpcRequest(fdo, DPC);
+	IoInitializeDpcRequest(fdo, DPC);
 	//pdx->NextStackDevice = IoAttachDeviceToDeviceStack(fdo, PhysicalDeviceObject);
 	status = IoAttachDeviceToDeviceStackSafe(fdo, PhysicalDeviceObject, &pdx->NextStackDevice);
 	if (!NT_SUCCESS(status))
@@ -293,9 +333,14 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 	pdx->admin_sq_tail = 0;
 	pdx->admin_cq_head = 0;
 	pdx->admin_cq_phase = 1;
-
 	pdx->admin_sq_doorbell = nullptr;
 	pdx->admin_cq_doorbell = nullptr;
+
+	pdx->io_sq_tail = 0;
+	pdx->io_cq_head = 0;
+	pdx->io_cq_phase = 1;
+	pdx->io_sq_doorbell = nullptr;
+	pdx->io_cq_doorbell = nullptr;
 
 	//pdx->sq = nullptr;
 	//pdx->cq = nullptr;
@@ -372,13 +417,13 @@ VOID ShowResources(IN PCM_PARTIAL_RESOURCE_LIST list, IN PDEVICE_EXTENSION pdx)
 
 	PCM_PARTIAL_RESOURCE_DESCRIPTOR resource = list->PartialDescriptors;
 
-	//IO_CONNECT_INTERRUPT_PARAMETERS     Connect;
-	//IO_DISCONNECT_INTERRUPT_PARAMETERS  Disconnect;
+	IO_CONNECT_INTERRUPT_PARAMETERS     Connect;
+	IO_DISCONNECT_INTERRUPT_PARAMETERS  Disconnect;
 
 	//UNREFERENCED_PARAMETER(pdx);
-	//PIO_INTERRUPT_MESSAGE_INFO  p;
-	//PIO_INTERRUPT_MESSAGE_INFO_ENTRY pp;
-	//NTSTATUS status;
+	PIO_INTERRUPT_MESSAGE_INFO  p;
+	PIO_INTERRUPT_MESSAGE_INFO_ENTRY pp;
+	NTSTATUS status;
 
 	for (i = 0; i < nres; ++i, ++resource)
 	{                                                   
@@ -417,17 +462,16 @@ VOID ShowResources(IN PCM_PARTIAL_RESOURCE_LIST list, IN PDEVICE_EXTENSION pdx)
 			break;
 		case CmResourceTypeInterrupt:
 
-#if  0
+#if  1
 			RtlZeroMemory(&Connect, sizeof(IO_CONNECT_INTERRUPT_PARAMETERS));
 			RtlZeroMemory(&Disconnect, sizeof(IO_DISCONNECT_INTERRUPT_PARAMETERS));
 
-#if 1
-			Connect.Version = CONNECT_FULLY_SPECIFIED;
+			Connect.Version = CONNECT_FULLY_SPECIFIED_GROUP;
 			Connect.FullySpecified.PhysicalDeviceObject = pdx->PhyDevice;
 		
 			Connect.FullySpecified.InterruptObject = &pdx->InterruptObject;
 			Connect.FullySpecified.ServiceRoutine = FdoInterruptCallback;
-			Connect.FullySpecified.ServiceContext = pdx->fdo;
+			Connect.FullySpecified.ServiceContext = pdx;
 
 			Connect.FullySpecified.FloatingSave = FALSE;
 			Connect.FullySpecified.SpinLock = NULL;
@@ -456,30 +500,30 @@ VOID ShowResources(IN PCM_PARTIAL_RESOURCE_LIST list, IN PDEVICE_EXTENSION pdx)
 
 			if (NT_SUCCESS(status)) {
 				DbgPrint("Success IoConnectInterruptEx");
-				//p = (PIO_INTERRUPT_MESSAGE_INFO)pdx->InterruptObject;
-				//pp = p->MessageInfo;
-				//DbgPrint("interrupt version: %d", Connect.Version);
+				pdx->IsrType = Connect.Version;
+				pdx->bInterruptEnable = TRUE;
+				p = (PIO_INTERRUPT_MESSAGE_INFO)pdx->InterruptObject;
+				pp = p->MessageInfo;
+				DbgPrint("interrupt version: %d", Connect.Version);
 
-				//for (i = 0; i < p->MessageCount; ++i) {
-				//	DbgPrint("IoConnectInterruptEx params ===> Irql:%X, Vector:%X, Proc:%llX, MessageData:%lX, MessageAddress:%lX\n",
-				//		(pp + i)->Irql,
-				//		(pp + i)->Vector,
-				//		(pp + i)->TargetProcessorSet,
-				//		(pp + i)->MessageData,
-				//		(pp + i)->MessageAddress.LowPart
-				//	);
-				//}
+				for (i = 0; i < p->MessageCount; ++i) {
+					DbgPrint("IoConnectInterruptEx params ===> Irql:%X, Vector:%X, Proc:%llX, MessageData:%lX, MessageAddress:%lX\n",
+						(pp + i)->Irql,
+						(pp + i)->Vector,
+						(pp + i)->TargetProcessorSet,
+						(pp + i)->MessageData,
+						(pp + i)->MessageAddress.LowPart
+					);
+				}
 
-				Disconnect.Version = Connect.Version;
-				Disconnect.ConnectionContext.InterruptObject = pdx->InterruptObject;
-				IoDisconnectInterruptEx(&Disconnect);
+				//Disconnect.Version = Connect.Version;
+				//Disconnect.ConnectionContext.InterruptObject = pdx->InterruptObject;
+				//IoDisconnectInterruptEx(&Disconnect);
 			}
 			else {
 				DbgPrint("Failure  IoConnectInterruptEx:   %x", status);
 
 			}
-
-#endif
 
 			//}
 			//else {
@@ -594,58 +638,103 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	// Show resource from PNP Manager
 	ShowResources( translated, pdx);
 
+#if 0
+	{
+		UNICODE_STRING name;
+		UNICODE_STRING eventbase;
+		UNICODE_STRING eventname;
+		STRING eventnameString;
 
-	UNICODE_STRING name;
-	UNICODE_STRING eventbase;
-	UNICODE_STRING eventname;
-	STRING eventnameString;
+		char cEventName[EVENTNAMEMAXLEN] = { 0 };
 
-	char cEventName[EVENTNAMEMAXLEN] = { 0 };
+		sprintf(cEventName, "%s%d", "admin", pdx->DeviceCounter);
 
-	sprintf(cEventName, "%s%d", "admin", pdx->DeviceCounter);
+		RtlInitUnicodeString(&eventbase, L"\\BaseNamedObjects\\");
 
-	RtlInitUnicodeString(&eventbase, L"\\BaseNamedObjects\\");
+		name.MaximumLength = EVENTNAMEMAXLEN + eventbase.Length;
+		name.Length = 0;
+		name.Buffer = (PWCH)ExAllocatePool(NonPagedPool, name.MaximumLength);
+		RtlZeroMemory(name.Buffer, name.MaximumLength);
 
-	name.MaximumLength = EVENTNAMEMAXLEN + eventbase.Length;
-	name.Length = 0;
-	name.Buffer = (PWCH)ExAllocatePool(NonPagedPool, name.MaximumLength);
-	RtlZeroMemory(name.Buffer, name.MaximumLength);
+		RtlInitString(&eventnameString, cEventName);
+		RtlAnsiStringToUnicodeString(&eventname, &eventnameString, TRUE);
 
-	RtlInitString(&eventnameString, cEventName);
-	RtlAnsiStringToUnicodeString(&eventname, &eventnameString, TRUE);
+		RtlCopyUnicodeString(&name, &eventbase);
+		RtlAppendUnicodeStringToString(&name, &eventname);
+		RtlFreeUnicodeString(&eventname);
 
-	RtlCopyUnicodeString(&name, &eventbase);
-	RtlAppendUnicodeStringToString(&name, &eventname);
-	RtlFreeUnicodeString(&eventname);
+		pdx->adminEvent = IoCreateNotificationEvent(&name, &pdx->adminHandle);
 
-	pdx->Event = IoCreateNotificationEvent(&name, &pdx->handle);
+		ExFreePool(name.Buffer);
 
-	ExFreePool(name.Buffer);
+		if (!pdx->adminEvent) {
+			status = STATUS_UNSUCCESSFUL;
+			Irp->IoStatus.Status = status;
+			IoCompleteRequest(Irp, IO_NO_INCREMENT);
+			return status;
+		}
 
-	if (!pdx->Event) {
-		status =  STATUS_UNSUCCESSFUL;
-		Irp->IoStatus.Status = status;
-		IoCompleteRequest(Irp, IO_NO_INCREMENT);
-		return status;
+		KeClearEvent(pdx->adminEvent);
 	}
 
-	KeClearEvent(pdx->Event);
 
+	{
+		UNICODE_STRING name;
+		UNICODE_STRING eventbase;
+		UNICODE_STRING eventname;
+		STRING eventnameString;
+
+		char cEventName[EVENTNAMEMAXLEN] = { 0 };
+
+		sprintf(cEventName, "%s%d", "io", pdx->DeviceCounter);
+
+		RtlInitUnicodeString(&eventbase, L"\\BaseNamedObjects\\");
+
+		name.MaximumLength = EVENTNAMEMAXLEN + eventbase.Length;
+		name.Length = 0;
+		name.Buffer = (PWCH)ExAllocatePool(NonPagedPool, name.MaximumLength);
+		RtlZeroMemory(name.Buffer, name.MaximumLength);
+
+		RtlInitString(&eventnameString, cEventName);
+		RtlAnsiStringToUnicodeString(&eventname, &eventnameString, TRUE);
+
+		RtlCopyUnicodeString(&name, &eventbase);
+		RtlAppendUnicodeStringToString(&name, &eventname);
+		RtlFreeUnicodeString(&eventname);
+
+		pdx->ioEvent = IoCreateNotificationEvent(&name, &pdx->ioHandle);
+
+		ExFreePool(name.Buffer);
+
+		if (!pdx->ioEvent) {
+			status = STATUS_UNSUCCESSFUL;
+			Irp->IoStatus.Status = status;
+			IoCompleteRequest(Irp, IO_NO_INCREMENT);
+			return status;
+		}
+
+		KeClearEvent(pdx->ioEvent);
+	}
+
+#endif
+	
+	#if 0
 	RtlZeroMemory(&Connect, sizeof(IO_CONNECT_INTERRUPT_PARAMETERS));
 	Connect.Version = CONNECT_MESSAGE_BASED;
-	Connect.MessageBased.ConnectionContext.Generic = &pdx->InterruptObject;
+	Connect.MessageBased.ConnectionContext.InterruptObject = &pdx->InterruptObject;
 	Connect.MessageBased.PhysicalDeviceObject = pdx->PhyDevice;
 	Connect.MessageBased.FloatingSave = FALSE;
 	Connect.MessageBased.SpinLock = nullptr;
 	Connect.MessageBased.MessageServiceRoutine = MSI_ISR;
 	Connect.MessageBased.SynchronizeIrql = 0;
 	Connect.MessageBased.ServiceContext = pdx;
-	Connect.MessageBased.FallBackServiceRoutine = nullptr;
+	Connect.MessageBased.FallBackServiceRoutine = FdoInterruptCallback;
 
 	status = IoConnectInterruptEx(&Connect);
 
 	if (NT_SUCCESS(status)) {
 		DbgPrint("Success IoConnectInterruptEx\n");
+		pdx->IsrType = Connect.Version;
 		pdx->bInterruptEnable = TRUE;
 		p = (PIO_INTERRUPT_MESSAGE_INFO)pdx->InterruptObject;
 		pp = p->MessageInfo;
@@ -662,15 +751,19 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		}		
 	}
 	else {
-		ZwClose(pdx->handle);
-		pdx->handle = nullptr;
+		ZwClose(pdx->adminHandle);
+		pdx->adminHandle = nullptr;
+		ZwClose(pdx->ioHandle);
+		pdx->ioHandle = nullptr;
 		Irp->IoStatus.Status = status;
 		IoCompleteRequest(Irp, IO_NO_INCREMENT);
 		return status;
 
 	}
 
-#if 1
+#endif
+
+#if 0
 
 	// Check bus Master
 	status = ReadWriteConfigSpace(pdx->fdo, 0, &command_reg, 4, 2);
@@ -694,13 +787,6 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	}
 
 
-
-	// Create Completion Queue
-	//PHYSICAL_ADDRESS pa = { 0x3, (LONG)0xffffffff };
-	//pdx -> admin_cq_pvk = MmAllocateContiguousMemory(sizeof(nvme_cq_entry_t) * 64, pa);
-	//PHYSICAL_ADDRESS cq_phyaddr = MmGetPhysicalAddress(pdx->admin_cq_pvk);
-	//DbgPrint("Admin CQ: %llX  ", cq_phyaddr.QuadPart);
-
 	if (pdx->dmaAdapter) {
 		pdx->admin_cq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
 			pdx -> dmaAdapter,
@@ -710,13 +796,6 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		);
 	}
 
-
-	//  Create Submission Queue
-	 //pa = { 0x3, (LONG)0xffffffff };
-	 //pdx -> admin_sq_pvk   = MmAllocateContiguousMemory(sizeof(nvme_sq_entry_t) * 64, pa);
-
-	 //PHYSICAL_ADDRESS sq_phyaddr = MmGetPhysicalAddress(pdx->admin_sq_pvk);
-	 //DbgPrint("Admin SQ: %llX  ", sq_phyaddr.QuadPart);
 
 	if (pdx->dmaAdapter) {
 		pdx->admin_sq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
@@ -728,15 +807,39 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	}
 
 
-	
-	pdx->cq = (nvme_cq_entry_t*)pdx->admin_cq.pvk;
-	RtlZeroMemory(pdx->cq, sizeof(nvme_cq_entry_t) * 64);
 
-	pdx->sq = (nvme_sq_entry_t*)pdx->admin_sq.pvk;
-	RtlZeroMemory(pdx->sq, sizeof(nvme_sq_entry_t) * 64);
+	if (pdx->dmaAdapter) {
+		pdx->io_cq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
+			pdx->dmaAdapter,
+			4096,
+			&pdx->io_cq.dmaAddr,
+			FALSE
+		);
+	}
+
+
+	if (pdx->dmaAdapter) {
+		pdx->io_sq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
+			pdx->dmaAdapter,
+			4096,
+			&pdx->io_sq.dmaAddr,
+			FALSE
+		);
+	}
+
+
+	
+	pdx->admin_cq_entry = (nvme_cq_entry_t*)pdx->admin_cq.pvk;
+	RtlZeroMemory(pdx->admin_cq_entry, sizeof(nvme_cq_entry_t) * 64);
+
+	pdx->admin_sq_entry = (nvme_sq_entry_t*)pdx->admin_sq.pvk;
+	RtlZeroMemory(pdx->admin_sq_entry, sizeof(nvme_sq_entry_t) * 64);
 
 	 pdx->admin_sq_size = 64;
 	 pdx->admin_cq_size = 64;
+
+	 pdx->io_sq_size = 64;
+	 pdx->io_cq_size = 64;
 
 	 aqa.a.asqs = 64 - 1;
 	 aqa.a.acqs = 64 - 1;
@@ -750,12 +853,13 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 	 ctrl_reg->aqa.val = aqa.val;
 
-	pdx ->admin_sq_doorbell = ctrl_reg->sq0tdbl;
-	pdx ->admin_cq_doorbell = ctrl_reg->sq0tdbl + ((LONGLONG)1 << cap.a.dstrd);
+	pdx ->admin_sq_doorbell = ctrl_reg->sq0tdbl;                                                                         // 0
+	pdx ->admin_cq_doorbell = ctrl_reg->sq0tdbl + ((LONGLONG)1 << cap.a.dstrd);                // 1
 
-	DbgPrint("sq dbl   :%p\n", pdx->admin_sq_doorbell);
-
-	DbgPrint("cq dbl   :%p\n", pdx->admin_cq_doorbell);
+	pdx->io_sq_doorbell = ctrl_reg->sq0tdbl +((LONGLONG)1 << cap.a.dstrd) * (io_qid + 1);
+	pdx->io_cq_doorbell = ctrl_reg->sq0tdbl + ((LONGLONG)1 << cap.a.dstrd) * (io_qid + 2);
+	//DbgPrint("sq dbl   :%p\n", pdx->admin_sq_doorbell);
+	//DbgPrint("cq dbl   :%p\n", pdx->admin_cq_doorbell);
 
 	cc.val = NVME_CC_CSS_NVM;
 	cc.val |= 0 << NVME_CC_MPS_SHIFT;
@@ -770,13 +874,6 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		WinNVMeDelay(1);
 	}
 
-	
-	//Data Buffer
-	//pa = { 0x3, (LONG)0xffffffff };
-	//pdx->data_buffer = MmAllocateContiguousMemory(4096, pa);
-
-	//PHYSICAL_ADDRESS data = MmGetPhysicalAddress(pdx->data_buffer);
-	//DbgPrint("Data Buffer: %llX  ", data.QuadPart);
 
 	if (pdx->dmaAdapter) {
 		pdx->data_buffer.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
@@ -848,7 +945,28 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		}
 	}
 
-#if 1
+#if 0
+
+	if (pdx->io_sq.pvk) {
+		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapter,
+			4096,
+			pdx->io_sq.dmaAddr,
+			pdx->io_sq.pvk,
+			FALSE
+		);
+	}
+
+	if (pdx->io_cq.pvk) {
+		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapter,
+			4096,
+			pdx->io_cq.dmaAddr,
+			pdx->io_cq.pvk,
+			FALSE
+		);
+	}
+
 	if (pdx->admin_sq.pvk) {
 		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
 			pdx->dmaAdapter,
@@ -891,17 +1009,28 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 		RtlZeroMemory(&Disconnect, sizeof(IO_DISCONNECT_INTERRUPT_PARAMETERS));
 
-		Disconnect.Version = CONNECT_MESSAGE_BASED;
+		Disconnect.Version = pdx->IsrType;
 		Disconnect.ConnectionContext.InterruptObject = (PKINTERRUPT)pdx->InterruptObject;
 		IoDisconnectInterruptEx(&Disconnect);	
 	}
 
-	if (pdx->handle) {
+#if 0
+	if (pdx->adminHandle) {
 		DbgPrint("ZwClose\n");
 
-		ZwClose(pdx->handle);
-		pdx->handle = nullptr;
+		ZwClose(pdx->adminHandle);
+		pdx->adminHandle = nullptr;
 	}
+
+	if (pdx->ioHandle) {
+		DbgPrint("ZwClose\n");
+
+		ZwClose(pdx->ioHandle);
+		pdx->ioHandle = nullptr;
+	}
+
+#endif
+
 	if (pdx->bar0) {
 		MmUnmapIoSpace(pdx ->bar0 , pdx->bar_size);
 		DbgPrint("MmUnmapIoSpace\n");
@@ -1363,29 +1492,42 @@ NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 		case IOCTL_WINNVME_TEST:
 			DbgPrint("IOCTL_WINMEM_TEST\n");
 
-			cid = pdx->admin_sq_tail;
+			for (int i = 0; i < 10; ++i) {
+			
+				cid = pdx->admin_sq_tail;
 
-			if (pdx->sq != nullptr) {
-				pdx->sq[cid].get_log_page.opcode = nvme_admin_get_log_page;
+				if (pdx->admin_sq_entry != nullptr) {
+					pdx->admin_sq_entry[cid].get_log_page.opcode = nvme_admin_get_log_page;
+					pdx->admin_sq_entry[cid].get_log_page.command_id = (u16)cid;
+					pdx->admin_sq_entry[cid].get_log_page.nsid = 0xffffffff;
+					pdx->admin_sq_entry[cid].get_log_page.dptr.prp1 = pdx->data_buffer.dmaAddr.QuadPart;
+					pdx->admin_sq_entry[cid].get_log_page.lid = 2;
+					pdx->admin_sq_entry[cid].get_log_page.numdl = (4096 / sizeof(u32) - 1) & 0xff;
+					pdx->admin_sq_entry[cid].get_log_page.numdu = ((4096 / sizeof(u32) - 1) >> 16) & 0xff;
+				}
 
-				pdx->sq[cid].get_log_page.command_id = (u16)cid;
-				pdx->sq[cid].get_log_page.nsid = 0xffffffff;
-				pdx->sq[cid].get_log_page.dptr.prp1 = pdx->data_buffer.dmaAddr.QuadPart;
+				if (++pdx->admin_sq_tail == pdx->admin_sq_size) pdx->admin_sq_tail = 0;
+				*(volatile u32*)pdx->admin_sq_doorbell = pdx->admin_sq_tail;
 
-				pdx->sq[cid].get_log_page.lid = 2;
-
-				pdx->sq[cid].get_log_page.numdl = (4096 / sizeof(u32) - 1) & 0xff;
-				pdx->sq[cid].get_log_page.numdu = ((4096 / sizeof(u32) - 1) >> 16) & 0xff;
+			
+			
+			
 			}
 
-			if (++pdx->admin_sq_tail == pdx->admin_sq_size) pdx->admin_sq_tail = 0;
 
-			*(volatile u32*)pdx->admin_sq_doorbell = pdx->admin_sq_tail;
+
+
+
+
+
 
 			break;
 
-		case IOCTL_WINNVME_CLEAR_EVENT:
-			KeClearEvent(pdx->Event);
+		case IOCTL_WINNVME_CLEAR_ADMIN_EVENT:
+			KeClearEvent(pdx->adminEvent);
+
+		case IOCTL_WINNVME_CLEAR_IO_EVENT:
+			KeClearEvent(pdx->ioEvent);
 
 		default:
 			break;
