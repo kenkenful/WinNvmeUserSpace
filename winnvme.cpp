@@ -274,6 +274,7 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 	UNICODE_STRING		devName;
 	UNICODE_STRING		symLinkName;
 
+	DbgPrint("WinNVMeAddDevice\n");
 	//DECLARE_UNICODE_STRING_SIZE(devName, 64);
 	//DECLARE_UNICODE_STRING_SIZE(symLinkName, 64);
 
@@ -615,6 +616,9 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	PIO_INTERRUPT_MESSAGE_INFO_ENTRY pp;
 	UINT16     command_reg;
 	int i;
+
+	DbgPrint("HandleStartDevice\n");
+
 	status = ForwardAndWait(pdx, Irp);        
 
 	if (!NT_SUCCESS(status))                
@@ -625,6 +629,113 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	}
 
 	stack = IoGetCurrentIrpStackLocation(Irp);
+
+
+
+	/* Allocate DMA */
+	if (pdx->dmaAdapter) {
+#if 0
+		pdx->admin_cq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
+			pdx->dmaAdapter,
+			65536,
+			&pdx->admin_cq.dmaAddr,
+			FALSE
+		);
+
+		pdx->admin_sq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
+			pdx->dmaAdapter,
+			65536,
+			&pdx->admin_sq.dmaAddr,
+			FALSE
+		);
+
+		pdx->io_cq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
+			pdx->dmaAdapter,
+			4096,
+			&pdx->io_cq.dmaAddr,
+			FALSE
+		);
+
+		pdx->io_sq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
+			pdx->dmaAdapter,
+			4096,
+			&pdx->io_sq.dmaAddr,
+			FALSE
+		);
+
+		pdx->data_buffer.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
+			pdx->dmaAdapter,
+			4096,
+			&pdx->data_buffer.dmaAddr,
+			FALSE
+		);
+
+
+#else
+		pdx->admin_cq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBufferEx(
+			pdx->dmaAdapter,
+			nullptr,
+			65536,
+			&pdx->admin_cq.dmaAddr,
+			FALSE,
+			KeGetCurrentNodeNumber()
+		);
+
+		pdx->admin_sq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBufferEx(
+			pdx->dmaAdapter,
+			nullptr,
+			65536,
+			&pdx->admin_sq.dmaAddr,
+			FALSE,
+			KeGetCurrentNodeNumber()
+		);
+
+		pdx->io_cq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBufferEx(
+			pdx->dmaAdapter,
+			nullptr,
+			4096,
+			&pdx->io_cq.dmaAddr,
+			FALSE,
+			KeGetCurrentNodeNumber()
+		);
+
+
+		pdx->io_sq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBufferEx(
+			pdx->dmaAdapter,
+			nullptr,
+			4096,
+			&pdx->io_sq.dmaAddr,
+			FALSE,
+			KeGetCurrentNodeNumber()
+		);
+
+		for (int i = 0; i < 1024; ++i) {
+			pdx->data_buffer[i].pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBufferEx(
+				pdx->dmaAdapter,
+				nullptr,
+				4096,
+				&pdx->data_buffer[i].dmaAddr,
+				FALSE,
+				KeGetCurrentNodeNumber()
+			);
+		}
+
+#endif
+
+	}
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 	// Check bus Master
 	status = ReadWriteConfigSpace(pdx->fdo, 0, &command_reg, 4, 2);
@@ -780,131 +891,12 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		WinNVMeDelay(1);
 	}
 
-
 	pdx->admin_cq_size = 1024;
 	pdx->admin_sq_size = 1024;
 
 	pdx->io_cq_size = 64;
 	pdx->io_sq_size = 64;
 
-	/* Allocate DMA */
-	if (pdx->dmaAdapter) {
-#if 0
-		pdx->admin_cq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
-			pdx->dmaAdapter,
-			65536,
-			&pdx->admin_cq.dmaAddr,
-			FALSE
-		);
-#else
-		pdx->admin_cq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBufferEx(
-			pdx->dmaAdapter,
-			nullptr,
-			65536,
-			&pdx->admin_cq.dmaAddr,
-			FALSE,
-			KeGetCurrentNodeNumber()
-		);
-
-#endif
-
-	}
-
-
-	if (pdx->dmaAdapter) {
-#if 0
-		pdx->admin_sq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
-			pdx->dmaAdapter,
-			65536,
-			&pdx->admin_sq.dmaAddr,
-			FALSE
-		);
-
-#else 
-		pdx->admin_sq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBufferEx(
-			pdx->dmaAdapter,
-			nullptr,
-			65536,
-			&pdx->admin_sq.dmaAddr,
-			FALSE,
-			KeGetCurrentNodeNumber()
-		);
-#endif
-	}
-
-
-
-	if (pdx->dmaAdapter) {
-#if 0
-		pdx->io_cq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
-			pdx->dmaAdapter,
-			4096,
-			&pdx->io_cq.dmaAddr,
-			FALSE
-		);
-#else
-		pdx->io_cq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBufferEx(
-			pdx->dmaAdapter,
-			nullptr,
-			4096,
-			&pdx->io_cq.dmaAddr,
-			FALSE,
-			KeGetCurrentNodeNumber()
-		);
-
-#endif
-
-	}
-
-
-	if (pdx->dmaAdapter) {
-#if 0
-		pdx->io_sq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
-			pdx->dmaAdapter,
-			4096,
-			&pdx->io_sq.dmaAddr,
-			FALSE
-		);
-#else
-		pdx->io_sq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBufferEx(
-			pdx->dmaAdapter,
-			nullptr,
-			4096,
-			&pdx->io_sq.dmaAddr,
-			FALSE,
-			KeGetCurrentNodeNumber()
-		);
-#endif
-	}
-
-
-
-	if (pdx->dmaAdapter) {
-#if 0
-		pdx->data_buffer.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
-			pdx->dmaAdapter,
-			4096,
-			&pdx->data_buffer.dmaAddr,
-			FALSE
-		);
-#else
-		for (int i = 0; i < 1024; ++i) {
-			pdx->data_buffer[i].pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBufferEx(
-				pdx->dmaAdapter,
-				nullptr,
-				4096,
-				&pdx->data_buffer[i].dmaAddr,
-				FALSE,
-				KeGetCurrentNodeNumber()
-			);
-		}
-
-#endif
-	}
-
-
-
-	
 	pdx->admin_cq_entry = (nvme_cq_entry_t*)pdx->admin_cq.pvk;
 	RtlZeroMemory(pdx->admin_cq_entry, sizeof(nvme_cq_entry_t) * pdx->admin_cq_size);
 
@@ -1033,21 +1025,25 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	return status;
 }
 
+NTSTATUS HandleQueryRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
+	UNREFERENCED_PARAMETER(Irp);
+	DbgPrint("HandleQueryRemoveDevice\n");
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	return  DefaultPnpHandler(pdx, Irp);
 
 
-
+}
 
 NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 {
 	NTSTATUS status;
 	IO_DISCONNECT_INTERRUPT_PARAMETERS  Disconnect;
 
-	Irp->IoStatus.Status = STATUS_SUCCESS;
-	status = DefaultPnpHandler(pdx, Irp);
+	DbgPrint("HandleRemoveDevice\n");
 
 	if (pdx->bInterruptEnable) {
 		DbgPrint("IoDisconnectInterruptEx\n");
-
+		pdx->bInterruptEnable = false;
 		RtlZeroMemory(&Disconnect, sizeof(IO_DISCONNECT_INTERRUPT_PARAMETERS));
 
 		Disconnect.Version = pdx->IsrType;
@@ -1077,49 +1073,6 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 	}
 
-#if 0
-	{
-		PSINGLE_LIST_ENTRY pLink = PopEntryList(&pdx->lstMapInfo);
-
-		while (pLink)
-		{
-			PMAPINFO pMapInfo = CONTAINING_RECORD(pLink, MAPINFO, link);
-
-			MmUnmapLockedPages(pMapInfo->pvu, pMapInfo->pMdl);
-			IoFreeMdl(pMapInfo->pMdl);
-			MmUnmapIoSpace(pMapInfo->pvk, pMapInfo->memSize);
-
-			ExFreePool(pMapInfo);
-
-			pLink = PopEntryList(&pdx->lstMapInfo);
-		}
-	}
-
-	{
-		PSINGLE_LIST_ENTRY pLink = PopEntryList(&pdx->lstDMAMapInfo);
-
-		while (pLink)
-		{
-			PMEMORY pDmaMapInfo = CONTAINING_RECORD(pLink, MEMORY, link);
-
-			MmUnmapLockedPages(pDmaMapInfo->pvu, pDmaMapInfo->pMdl);
-			IoFreeMdl(pDmaMapInfo->pMdl);
-
-			pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
-				pdx->dmaAdapter,
-				pDmaMapInfo->Length,
-				pDmaMapInfo->dmaAddr,
-				pDmaMapInfo->pvk,
-				TRUE
-			);
-
-			ExFreePool(pDmaMapInfo);
-
-			pLink = PopEntryList(&pdx->lstDMAMapInfo);
-		}
-	}
-
-#endif
 
 #if 1
 
@@ -1131,6 +1084,7 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 			pdx->io_sq.pvk,
 			FALSE
 		);
+		pdx->io_sq.pvk = nullptr;
 	}
 
 	if (pdx->io_cq.pvk) {
@@ -1141,6 +1095,7 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 			pdx->io_cq.pvk,
 			FALSE
 		);
+		pdx->io_cq.pvk = nullptr;
 	}
 
 	if (pdx->admin_sq.pvk) {
@@ -1151,6 +1106,7 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 			pdx->admin_sq.pvk,
 			FALSE
 		);
+		pdx->admin_sq.pvk = nullptr;
 	}
 
 	if (pdx->admin_cq.pvk) {
@@ -1161,6 +1117,7 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 			pdx->admin_cq.pvk,
 			FALSE
 		);
+		pdx->admin_cq.pvk = nullptr;
 	}
 
 	for (int i = 0; i < 1024; ++i) {
@@ -1172,16 +1129,17 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 				pdx->data_buffer[i].pvk,
 				FALSE
 			);
+			pdx->data_buffer[i].pvk = nullptr;
 		}
 	}
 
+	if (pdx->dmaAdapter != nullptr) {
+		pdx->dmaAdapter->DmaOperations->PutDmaAdapter(pdx->dmaAdapter);
+		pdx->dmaAdapter = nullptr;
+	}
 
 #endif
 
-	if (pdx->dmaAdapter != nullptr) {
-		pdx->dmaAdapter->DmaOperations->PutDmaAdapter(pdx->dmaAdapter);
-
-	}
 
 
 #if 1
@@ -1206,7 +1164,9 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		DbgPrint("MmUnmapIoSpace\n");
 	}
 
-	DbgPrint("Remove Device\n");
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	status = DefaultPnpHandler(pdx, Irp);      /* 下位ドライバーへ処理の依頼  */
+
 	IoDeleteSymbolicLink(&pdx->ustrSymLinkName);
 
 	if (pdx->NextStackDevice)
@@ -1217,7 +1177,164 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	IoDeleteDevice(pdx->fdo);
 
 	return status;
+	
 }
+
+
+
+NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
+	NTSTATUS status;
+	IO_DISCONNECT_INTERRUPT_PARAMETERS  Disconnect;
+
+	DbgPrint("HandleRemoveDevice\n");
+
+	if (pdx->bInterruptEnable) {
+		DbgPrint("IoDisconnectInterruptEx\n");
+		pdx->bInterruptEnable = false;
+		RtlZeroMemory(&Disconnect, sizeof(IO_DISCONNECT_INTERRUPT_PARAMETERS));
+
+		Disconnect.Version = pdx->IsrType;
+		Disconnect.ConnectionContext.InterruptObject = (PKINTERRUPT)pdx->InterruptObject;
+		IoDisconnectInterruptEx(&Disconnect);
+	}
+
+	while (!IsListEmpty(&pdx->winnvme_dma_linkListHead))
+	{
+		DbgPrint("unalloc dma \n");
+
+		PLIST_ENTRY pEntry = RemoveTailList(&pdx->winnvme_dma_linkListHead);
+		PMEMORY pDmaMem = CONTAINING_RECORD(pEntry, MEMORY, ListEntry);
+		//DbgPrint("Map physical 0x%p to virtual 0x%p, size %u\n", pMapInfo->pvk, pMapInfo->pvu , pMapInfo->memSize );
+
+		MmUnmapLockedPages(pDmaMem->pvu, pDmaMem->pMdl);
+		IoFreeMdl(pDmaMem->pMdl);
+		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapter,
+			pDmaMem->Length,
+			pDmaMem->dmaAddr,
+			pDmaMem->pvk,
+			FALSE
+		);
+
+		ExFreePool(pDmaMem);
+
+	}
+
+
+#if 1
+
+	if (pdx->io_sq.pvk) {
+		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapter,
+			4096,
+			pdx->io_sq.dmaAddr,
+			pdx->io_sq.pvk,
+			FALSE
+		);
+		pdx->io_sq.pvk = nullptr;
+	}
+
+	if (pdx->io_cq.pvk) {
+		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapter,
+			4096,
+			pdx->io_cq.dmaAddr,
+			pdx->io_cq.pvk,
+			FALSE
+		);
+		pdx->io_cq.pvk = nullptr;
+	}
+
+	if (pdx->admin_sq.pvk) {
+		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapter,
+			65536,
+			pdx->admin_sq.dmaAddr,
+			pdx->admin_sq.pvk,
+			FALSE
+		);
+		pdx->admin_sq.pvk = nullptr;
+	}
+
+	if (pdx->admin_cq.pvk) {
+		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapter,
+			65536,
+			pdx->admin_cq.dmaAddr,
+			pdx->admin_cq.pvk,
+			FALSE
+		);
+		pdx->admin_cq.pvk = nullptr;
+	}
+
+	for (int i = 0; i < 1024; ++i) {
+		if (pdx->data_buffer[i].pvk) {
+			pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
+				pdx->dmaAdapter,
+				4096,
+				pdx->data_buffer[i].dmaAddr,
+				pdx->data_buffer[i].pvk,
+				FALSE
+			);
+			pdx->data_buffer[i].pvk = nullptr;
+		}
+	}
+
+	if (pdx->dmaAdapter != nullptr) {
+		pdx->dmaAdapter->DmaOperations->PutDmaAdapter(pdx->dmaAdapter);
+		pdx->dmaAdapter = nullptr;
+	}
+
+#endif
+
+#if 1
+	if (pdx->adminHandle) {
+		DbgPrint("ZwClose\n");
+
+		ZwClose(pdx->adminHandle);
+		pdx->adminHandle = nullptr;
+	}
+
+	//if (pdx->ioHandle) {
+	//	DbgPrint("ZwClose\n");
+
+	//	ZwClose(pdx->ioHandle);
+	//	pdx->ioHandle = nullptr;
+	//}
+
+#endif
+
+	if (pdx->bar0) {
+		MmUnmapIoSpace(pdx->bar0, pdx->bar_size);
+		DbgPrint("MmUnmapIoSpace\n");
+	}
+
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	status = DefaultPnpHandler(pdx, Irp);      /* 下位ドライバーへ処理の依頼  */
+
+	IoDeleteSymbolicLink(&pdx->ustrSymLinkName);
+
+	if (pdx->NextStackDevice)
+	{
+		IoDetachDevice(pdx->NextStackDevice);
+	}
+
+	IoDeleteDevice(pdx->fdo);
+
+	return status;
+
+}
+
+NTSTATUS HandleQueryStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
+	UNREFERENCED_PARAMETER(Irp);
+	DbgPrint("HandleQueryStopDevice\n");
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	return  DefaultPnpHandler(pdx, Irp);
+
+}
+
+
+
 
 
 NTSTATUS WinNVMePnp(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
@@ -1228,12 +1345,13 @@ NTSTATUS WinNVMePnp(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
 	static NTSTATUS(*fcntab[])(PDEVICE_EXTENSION pdx, PIRP Irp) =
 	{
 		HandleStartDevice,  // IRP_MN_START_DEVICE
-		DefaultPnpHandler,  // IRP_MN_QUERY_REMOVE_DEVICE
+		HandleQueryRemoveDevice,  // IRP_MN_QUERY_REMOVE_DEVICE
 		HandleRemoveDevice, // IRP_MN_REMOVE_DEVICE
 		DefaultPnpHandler,  // IRP_MN_CANCEL_REMOVE_DEVICE
-		DefaultPnpHandler,  // IRP_MN_STOP_DEVICE
-		DefaultPnpHandler,  // IRP_MN_QUERY_STOP_DEVICE
+		HandleStopDevice,  // IRP_MN_STOP_DEVICE
+		HandleQueryStopDevice,  // IRP_MN_QUERY_STOP_DEVICE
 		DefaultPnpHandler,  // IRP_MN_CANCEL_STOP_DEVICE
+
 		DefaultPnpHandler,  // IRP_MN_QUERY_DEVICE_RELATIONS
 		DefaultPnpHandler,  // IRP_MN_QUERY_INTERFACE
 		DefaultPnpHandler,  // IRP_MN_QUERY_CAPABILITIES
@@ -1241,7 +1359,9 @@ NTSTATUS WinNVMePnp(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
 		DefaultPnpHandler,  // IRP_MN_QUERY_RESOURCE_REQUIREMENTS
 		DefaultPnpHandler,  // IRP_MN_QUERY_DEVICE_TEXT
 		DefaultPnpHandler,  // IRP_MN_FILTER_RESOURCE_REQUIREMENTS
-		DefaultPnpHandler,  //
+
+		DefaultPnpHandler,  // 0x0E
+
 		DefaultPnpHandler,  // IRP_MN_READ_CONFIG
 		DefaultPnpHandler,  // IRP_MN_WRITE_CONFIG
 		DefaultPnpHandler,  // IRP_MN_EJECT
@@ -1723,7 +1843,7 @@ NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 void WinNVMeUnload(IN PDRIVER_OBJECT DriverObject)
 {
 	UNREFERENCED_PARAMETER(DriverObject);
-
+	DbgPrint("WinNVMeUnload\n");
 	while (!IsListEmpty(&winnvme_mmap_linkListHead))
 	{
 		PLIST_ENTRY pEntry = RemoveTailList(&winnvme_mmap_linkListHead);
