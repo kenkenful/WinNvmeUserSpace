@@ -82,6 +82,8 @@ typedef struct _DEVICE_EXTENSION
 	int								admin_cq_size;       ///< queue size
 	nvme_sq_entry_t*	admin_sq_entry;
 	nvme_cq_entry_t*	admin_cq_entry;
+
+	
 	MEMORY					admin_sq;
 	MEMORY					admin_cq;
 
@@ -95,6 +97,7 @@ typedef struct _DEVICE_EXTENSION
 	int								io_cq_size;       ///< queue size
 	nvme_sq_entry_t*	io_sq_entry;
 	nvme_cq_entry_t*	io_cq_entry;
+
 	MEMORY					io_sq;
 	MEMORY					io_cq;
 
@@ -131,6 +134,10 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 NTSTATUS WinNVMePnp(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
 NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
 NTSTATUS WinNVMeDispatchRoutine(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
+
+NTSTATUS WinNVMeCleanUp(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
+NTSTATUS WinNVMePower(IN PDEVICE_OBJECT fdo, IN PIRP Irp);
+
 void WinNVMeUnload(IN PDRIVER_OBJECT DriverObject);
 
 NTSTATUS ReadWriteConfigSpace(IN PDEVICE_OBJECT DeviceObject, IN ULONG ReadOrWrite, // 0 for read 1 for write
@@ -149,6 +156,8 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObject, IN PUNICODE_STRING pRegist
 	pDriverObject->MajorFunction[IRP_MJ_CLOSE] = WinNVMeDispatchRoutine;
 	pDriverObject->MajorFunction[IRP_MJ_READ] = WinNVMeDispatchRoutine;
 	pDriverObject->MajorFunction[IRP_MJ_WRITE] = WinNVMeDispatchRoutine;
+	pDriverObject->MajorFunction[IRP_MJ_CLEANUP] = WinNVMeCleanUp;
+	pDriverObject->MajorFunction[IRP_MJ_POWER] = WinNVMePower;
 	pDriverObject->DriverUnload = WinNVMeUnload;
 
 	InitializeListHead(&winnvme_mmap_linkListHead);
@@ -341,6 +350,9 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 
 	pdx->dmaAdapter = IoGetDmaAdapter(pdx->PhyDevice, &DeviceDescription, &pdx->NumOfMappedRegister);
 
+	DbgPrint("Number of mapped Register: %d\n", pdx->NumOfMappedRegister);
+
+
 	if (!pdx->dmaAdapter) {
 		DbgPrint("Failure IoGetDmaAdapter\n");
 
@@ -351,7 +363,7 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 
 		IoDeleteDevice(pdx->fdo);
 
-		return STATUS_INSUFFICIENT_RESOURCES;
+		return STATUS_UNSUCCESSFUL;
 	}
 
 	//RtlUnicodeStringPrintf(&symLinkName, L"\\DosDevices\\WINMEM_%d", gucDeviceCounter);
@@ -632,9 +644,7 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 
 
-	/* Allocate DMA */
-	if (pdx->dmaAdapter) {
-#if 0
+#if  1
 		pdx->admin_cq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
 			pdx->dmaAdapter,
 			65536,
@@ -663,13 +673,14 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 			FALSE
 		);
 
-		pdx->data_buffer.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
-			pdx->dmaAdapter,
-			4096,
-			&pdx->data_buffer.dmaAddr,
-			FALSE
-		);
-
+		for (int i = 0; i < 1024; ++i) {
+			pdx->data_buffer[i].pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
+				pdx->dmaAdapter,
+				4096,
+				&pdx->data_buffer[i].dmaAddr,
+				FALSE
+			);
+		}
 
 #else
 		pdx->admin_cq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBufferEx(
@@ -721,20 +732,6 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		}
 
 #endif
-
-	}
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 	// Check bus Master
@@ -1073,6 +1070,20 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 	}
 
+	while (!IsListEmpty(&winnvme_mmap_linkListHead))
+	{
+		PLIST_ENTRY pEntry = RemoveTailList(&winnvme_mmap_linkListHead);
+		PMAPINFO pMapInfo = CONTAINING_RECORD(pEntry, MAPINFO, ListEntry);
+
+		//DbgPrint("Map physical 0x%p to virtual 0x%p, size %u\n", pMapInfo->pvk, pMapInfo->pvu , pMapInfo->memSize );
+
+		MmUnmapLockedPages(pMapInfo->pvu, pMapInfo->pMdl);
+		IoFreeMdl(pMapInfo->pMdl);
+		MmUnmapIoSpace(pMapInfo->pvk, pMapInfo->memSize);
+
+		ExFreePool(pMapInfo);
+
+	}
 
 #if 1
 
@@ -1161,6 +1172,7 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 	if (pdx->bar0) {
 		MmUnmapIoSpace(pdx ->bar0 , pdx->bar_size);
+		pdx->bar0 = nullptr;
 		DbgPrint("MmUnmapIoSpace\n");
 	}
 
@@ -1200,7 +1212,7 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 
 	while (!IsListEmpty(&pdx->winnvme_dma_linkListHead))
 	{
-		DbgPrint("unalloc dma \n");
+		DbgPrint("Unalloc DMA\n");
 
 		PLIST_ENTRY pEntry = RemoveTailList(&pdx->winnvme_dma_linkListHead);
 		PMEMORY pDmaMem = CONTAINING_RECORD(pEntry, MEMORY, ListEntry);
@@ -1208,6 +1220,7 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 
 		MmUnmapLockedPages(pDmaMem->pvu, pDmaMem->pMdl);
 		IoFreeMdl(pDmaMem->pMdl);
+
 		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
 			pdx->dmaAdapter,
 			pDmaMem->Length,
@@ -1218,6 +1231,21 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 
 		ExFreePool(pDmaMem);
 
+	}
+
+
+	while (!IsListEmpty(&winnvme_mmap_linkListHead))
+	{
+		PLIST_ENTRY pEntry = RemoveTailList(&winnvme_mmap_linkListHead);
+		PMAPINFO pMapInfo = CONTAINING_RECORD(pEntry, MAPINFO, ListEntry);
+
+		//DbgPrint("Map physical 0x%p to virtual 0x%p, size %u\n", pMapInfo->pvk, pMapInfo->pvu , pMapInfo->memSize );
+
+		MmUnmapLockedPages(pMapInfo->pvu, pMapInfo->pMdl);
+		IoFreeMdl(pMapInfo->pMdl);
+		MmUnmapIoSpace(pMapInfo->pvk, pMapInfo->memSize);
+
+		ExFreePool(pMapInfo);
 	}
 
 
@@ -1310,18 +1338,7 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 	}
 
 	Irp->IoStatus.Status = STATUS_SUCCESS;
-	status = DefaultPnpHandler(pdx, Irp);      /* 下位ドライバーへ処理の依頼  */
-
-	IoDeleteSymbolicLink(&pdx->ustrSymLinkName);
-
-	if (pdx->NextStackDevice)
-	{
-		IoDetachDevice(pdx->NextStackDevice);
-	}
-
-	IoDeleteDevice(pdx->fdo);
-
-	return status;
+	return DefaultPnpHandler(pdx, Irp);      /* 下位ドライバーへ処理の依頼  */
 
 }
 
@@ -1333,6 +1350,30 @@ NTSTATUS HandleQueryStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 
 }
 
+NTSTATUS HandleReadConfig(PDEVICE_EXTENSION pdx, PIRP Irp) {
+	UNREFERENCED_PARAMETER(Irp);
+	DbgPrint("HandleReadConfigDevice\n");
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	return  DefaultPnpHandler(pdx, Irp);
+
+}
+
+NTSTATUS HandleWriteConfig(PDEVICE_EXTENSION pdx, PIRP Irp) {
+	UNREFERENCED_PARAMETER(Irp);
+	DbgPrint("HandleWriteConfigDevice\n");
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	return  DefaultPnpHandler(pdx, Irp);
+
+}
+
+
+NTSTATUS HandleSupriseRemoval(PDEVICE_EXTENSION pdx, PIRP Irp) {
+	UNREFERENCED_PARAMETER(Irp);
+	DbgPrint("HandleSupriseRemoval\n");
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	return  DefaultPnpHandler(pdx, Irp);
+
+}
 
 
 
@@ -1362,15 +1403,15 @@ NTSTATUS WinNVMePnp(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
 
 		DefaultPnpHandler,  // 0x0E
 
-		DefaultPnpHandler,  // IRP_MN_READ_CONFIG
-		DefaultPnpHandler,  // IRP_MN_WRITE_CONFIG
+		HandleReadConfig,  // IRP_MN_READ_CONFIG
+		HandleWriteConfig,  // IRP_MN_WRITE_CONFIG
 		DefaultPnpHandler,  // IRP_MN_EJECT
 		DefaultPnpHandler,  // IRP_MN_SET_LOCK
 		DefaultPnpHandler,  // IRP_MN_QUERY_ID
 		DefaultPnpHandler,  // IRP_MN_QUERY_PNP_DEVICE_STATE
 		DefaultPnpHandler,  // IRP_MN_QUERY_BUS_INFORMATION
 		DefaultPnpHandler,  // IRP_MN_DEVICE_USAGE_NOTIFICATION
-		DefaultPnpHandler,  // IRP_MN_SURPRISE_REMOVAL
+		HandleSupriseRemoval,  // IRP_MN_SURPRISE_REMOVAL
 	};
 	static char* fcnname[] =
 	{
@@ -1417,6 +1458,30 @@ NTSTATUS WinNVMeDispatchRoutine(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
 	UNREFERENCED_PARAMETER(fdo);
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	Irp->IoStatus.Information = 0; 
+	IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+	return STATUS_SUCCESS;
+}
+
+NTSTATUS WinNVMeCleanUp(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
+{
+	UNREFERENCED_PARAMETER(fdo);
+	DbgPrint("WinNVMeCleanUp\n");
+
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	Irp->IoStatus.Information = 0;
+	IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+	return STATUS_SUCCESS;
+}
+
+NTSTATUS WinNVMePower(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
+{
+	UNREFERENCED_PARAMETER(fdo);
+	DbgPrint("WinNVMePower\n");
+
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	Irp->IoStatus.Information = 0;
 	IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
 	return STATUS_SUCCESS;
@@ -1844,21 +1909,7 @@ void WinNVMeUnload(IN PDRIVER_OBJECT DriverObject)
 {
 	UNREFERENCED_PARAMETER(DriverObject);
 	DbgPrint("WinNVMeUnload\n");
-	while (!IsListEmpty(&winnvme_mmap_linkListHead))
-	{
-		PLIST_ENTRY pEntry = RemoveTailList(&winnvme_mmap_linkListHead);
-		PMAPINFO pMapInfo = CONTAINING_RECORD(pEntry, MAPINFO, ListEntry);
-
-		//DbgPrint("Map physical 0x%p to virtual 0x%p, size %u\n", pMapInfo->pvk, pMapInfo->pvu , pMapInfo->memSize );
-
-		MmUnmapLockedPages(pMapInfo->pvu, pMapInfo->pMdl);
-		IoFreeMdl(pMapInfo->pMdl);
-		MmUnmapIoSpace(pMapInfo->pvk, pMapInfo->memSize);
-
-		ExFreePool(pMapInfo);
-
-	}
-
+	
 }
 
 void WinNVMeDelay(long long millsecond)
