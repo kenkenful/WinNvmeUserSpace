@@ -215,6 +215,14 @@ VOID DPC(
 	//UNREFERENCED_PARAMETER(context);
 	PDEVICE_EXTENSION p = (PDEVICE_EXTENSION)context;
 
+	if (KeGetCurrentIrql() == DISPATCH_LEVEL) {
+		DbgPrint("%s :  DISPATCH_LEVEL\n", __func__);
+	}
+	else if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
+		DbgPrint("%s :  PASSIVE_LEVEL\n", __func__);
+	}
+
+
 	KeSetEvent(p->adminEvent, IO_NO_INCREMENT, FALSE);
 	KeClearEvent(p->adminEvent);
 
@@ -284,6 +292,15 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 	UNICODE_STRING		symLinkName;
 
 	DbgPrint("WinNVMeAddDevice\n");
+
+	if (KeGetCurrentIrql() == DISPATCH_LEVEL) {
+		DbgPrint("%s :  DISPATCH_LEVEL\n", __func__);
+	}
+	else if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
+		DbgPrint("%s :  PASSIVE_LEVEL\n", __func__);
+	}
+
+
 	//DECLARE_UNICODE_STRING_SIZE(devName, 64);
 	//DECLARE_UNICODE_STRING_SIZE(symLinkName, 64);
 
@@ -308,6 +325,7 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 
 	pdx->adminHandle = nullptr;
 	//pdx->ioHandle = nullptr;
+	pdx->dmaAdapter = nullptr;
 
 	InitializeListHead(&pdx->winnvme_dma_linkListHead);
 	pdx->winnvme_dma_locker.Init();
@@ -413,7 +431,8 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 		}
 	}
 
-	fdo->Flags |= DO_BUFFERED_IO | DO_POWER_PAGABLE;
+	//fdo->Flags |= DO_BUFFERED_IO | DO_POWER_PAGABLE;
+	fdo->Flags |= DO_DIRECT_IO | DO_POWER_PAGABLE;
 	fdo->Flags &= ~DO_DEVICE_INITIALIZING;
 
 	DbgPrint("Success DriverEntry\n");
@@ -632,6 +651,14 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	DbgPrint("HandleStartDevice\n");
 
 	status = ForwardAndWait(pdx, Irp);        
+
+	if (KeGetCurrentIrql() == DISPATCH_LEVEL) {
+		DbgPrint("%s :  DISPATCH_LEVEL\n", __func__);
+	}
+	else if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
+		DbgPrint("%s :  PASSIVE_LEVEL\n", __func__);
+	}
+
 
 	if (!NT_SUCCESS(status))                
 	{
@@ -1023,20 +1050,29 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 }
 
 NTSTATUS HandleQueryRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
-	UNREFERENCED_PARAMETER(Irp);
-	DbgPrint("HandleQueryRemoveDevice\n");
+	//UNREFERENCED_PARAMETER(Irp);
+
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	return  DefaultPnpHandler(pdx, Irp);
-
 
 }
 
 NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 {
 	NTSTATUS status;
+	DbgPrint("HandleRemoveDevice\n");
+
 	IO_DISCONNECT_INTERRUPT_PARAMETERS  Disconnect;
 
-	DbgPrint("HandleRemoveDevice\n");
+	nvme_controller_reg_t* ctrl_reg = (nvme_controller_reg_t*)(pdx->bar0);
+
+	ctrl_reg->cc.a.en = 0;
+
+	while (ctrl_reg->csts.rdy == 1) {
+		DbgPrint("Waiting  controller disable\n");
+		WinNVMeDelay(1);
+	}
+
 
 	if (pdx->bInterruptEnable) {
 		DbgPrint("IoDisconnectInterruptEx\n");
@@ -1144,13 +1180,14 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		}
 	}
 
-	if (pdx->dmaAdapter != nullptr) {
-		pdx->dmaAdapter->DmaOperations->PutDmaAdapter(pdx->dmaAdapter);
-		pdx->dmaAdapter = nullptr;
-	}
-
 #endif
 
+	if (KeGetCurrentIrql() == DISPATCH_LEVEL) {
+		DbgPrint("%s :  DISPATCH_LEVEL\n",__func__);
+	}
+	else if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
+		DbgPrint("%s :  PASSIVE_LEVEL\n", __func__);
+	}
 
 
 #if 1
@@ -1192,13 +1229,11 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	
 }
 
-
-
 NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 	NTSTATUS status;
 	IO_DISCONNECT_INTERRUPT_PARAMETERS  Disconnect;
 
-	DbgPrint("HandleRemoveDevice\n");
+	DbgPrint("HandleStopDevice\n");
 
 	if (pdx->bInterruptEnable) {
 		DbgPrint("IoDisconnectInterruptEx\n");
@@ -1230,9 +1265,7 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 		);
 
 		ExFreePool(pDmaMem);
-
 	}
-
 
 	while (!IsListEmpty(&winnvme_mmap_linkListHead))
 	{
@@ -1309,7 +1342,8 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 	}
 
 	if (pdx->dmaAdapter != nullptr) {
-		pdx->dmaAdapter->DmaOperations->PutDmaAdapter(pdx->dmaAdapter);
+		(*pdx->dmaAdapter->DmaOperations->PutDmaAdapter)(pdx->dmaAdapter);
+		//pdx->dmaAdapter->DmaOperations->PutDmaAdapter(pdx->dmaAdapter);
 		pdx->dmaAdapter = nullptr;
 	}
 
@@ -1339,7 +1373,6 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	return DefaultPnpHandler(pdx, Irp);      /* 下位ドライバーへ処理の依頼  */
-
 }
 
 NTSTATUS HandleQueryStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
@@ -1347,25 +1380,22 @@ NTSTATUS HandleQueryStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 	DbgPrint("HandleQueryStopDevice\n");
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	return  DefaultPnpHandler(pdx, Irp);
-
 }
 
 NTSTATUS HandleReadConfig(PDEVICE_EXTENSION pdx, PIRP Irp) {
 	UNREFERENCED_PARAMETER(Irp);
-	DbgPrint("HandleReadConfigDevice\n");
+	DbgPrint("HandleReadConfig\n");
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	return  DefaultPnpHandler(pdx, Irp);
-
 }
 
 NTSTATUS HandleWriteConfig(PDEVICE_EXTENSION pdx, PIRP Irp) {
 	UNREFERENCED_PARAMETER(Irp);
-	DbgPrint("HandleWriteConfigDevice\n");
+	DbgPrint("HandleWriteConfig\n");
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	return  DefaultPnpHandler(pdx, Irp);
 
 }
-
 
 NTSTATUS HandleSupriseRemoval(PDEVICE_EXTENSION pdx, PIRP Irp) {
 	UNREFERENCED_PARAMETER(Irp);
@@ -1374,9 +1404,6 @@ NTSTATUS HandleSupriseRemoval(PDEVICE_EXTENSION pdx, PIRP Irp) {
 	return  DefaultPnpHandler(pdx, Irp);
 
 }
-
-
-
 
 NTSTATUS WinNVMePnp(IN PDEVICE_OBJECT fdo, IN PIRP Irp)
 {
@@ -1554,7 +1581,6 @@ End:
 	return status;
 }
 
-
 NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 {
 	//DbgPrint("Enter WinNVMeDeviceControl\n");
@@ -1563,6 +1589,14 @@ NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 	PIO_STACK_LOCATION irpStack;
 	PDEVICE_EXTENSION	pdx;
 	ULONG dwIoCtlCode;
+
+	if (KeGetCurrentIrql() == DISPATCH_LEVEL) {
+		DbgPrint("%s :  DISPATCH_LEVEL\n", __func__);
+	}
+	else if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
+		DbgPrint("%s :  PASSIVE_LEVEL\n", __func__);
+	}
+
 
 	int cid;
 
@@ -1609,7 +1643,6 @@ NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 						//build mdl and map to user space
 						MmBuildMdlForNonPagedPool(pMdl);
 
-						//pvu = MmMapLockedPages(pMdl, UserMode);
 						pvu = MmMapLockedPagesSpecifyCache(pMdl, UserMode, MmNonCached, NULL, FALSE, NormalPagePriority);
 
 						if (pvu) {
@@ -1623,10 +1656,6 @@ NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 							winnvme_mmap_locker.Lock();
 							InsertHeadList(&winnvme_mmap_linkListHead, &pMapInfo->ListEntry);
 							winnvme_mmap_locker.UnLock();
-
-							//PushEntryList(&pdx->lstMapInfo, &pMapInfo->link);
-							//ExInterlockedPushEntryList(&lstMapInfo, &pMapInfo->link, &singlelist_spinLock);
-							//DbgPrint("Map kernel virtual addr: 0x%p , user virtual addr: 0x%p, size %u\n", pvk, pvu, pMem->dwSize);
 
 							RtlCopyMemory(pSysBuf, &pvu, sizeof(PVOID));
 							irp->IoStatus.Information = sizeof(PVOID);
@@ -1647,7 +1676,6 @@ NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 				}
 				else
 					irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
-
 			}
 			else
 				irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
@@ -1657,7 +1685,6 @@ NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 		case IOCTL_WINNVME_UNMAP:
 
 			//DbgPrint("IOCTL_WINMEM_UNMAP\n");
-
 			if (dwInBufLen == sizeof(WINMEM))
 			{
 				PMAPINFO pMapInfo;
@@ -1678,13 +1705,6 @@ NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 							MmUnmapLockedPages(pMapInfo->pvu, pMapInfo->pMdl);
 							IoFreeMdl(pMapInfo->pMdl);
 							MmUnmapIoSpace(pMapInfo->pvk, pMapInfo->memSize);
-
-							//DbgPrint("Unmap user virtual address 0x%p, size %u\n", pMapInfo->pvu, pMapInfo->memSize);
-							//delete matched element from the list
-							//if (pLink == pdx->lstMapInfo.Next)
-							//	pdx->lstMapInfo.Next = pLink->Next;	//delete head elememt
-							//else
-							//	pPrevLink->Next = pLink->Next;
 							
 							winnvme_mmap_locker.Lock();
 							RemoveEntryList(&pMapInfo->ListEntry);
@@ -1697,11 +1717,8 @@ NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 
 						break;
 					}
-
-					//pPrevLink = pLink;
 					pLink = pLink->Flink;
 				}
-
 			}
 			else
 				irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
@@ -1718,7 +1735,7 @@ NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 				PHYSICAL_ADDRESS phyAddr;
 
 				if (pdx->dmaAdapter) {
-#if 0
+#if 1
 					pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
 						pdx->dmaAdapter,
 						pMem->dwSize,
@@ -1760,11 +1777,9 @@ NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 							pDmaMapInfo->dmaAddr.QuadPart = phyAddr.QuadPart;
 							pDmaMapInfo->Length = pMem->dwSize;
 
-							//PushEntryList(&pdx->lstDMAMapInfo, &pDmaMapInfo->link);
 							pdx->winnvme_dma_locker.Lock();
 							InsertHeadList(&pdx->winnvme_dma_linkListHead, &pDmaMapInfo->ListEntry);
 							pdx->winnvme_dma_locker.UnLock();
-
 
 							//DbgPrint("phy addr: 0x%llx\n", phyAddr.QuadPart);
 
@@ -1818,12 +1833,7 @@ NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 			if (dwInBufLen == sizeof(WINMEM))
 			{
 				PMEMORY pDmaMapInfo;
-				//PSINGLE_LIST_ENTRY pLink, pPrevLink;
-				PLIST_ENTRY pLink;
-
-				//initialize to head
-				//pPrevLink = pLink = pdx->lstDMAMapInfo.Next;
-				pLink = pdx->winnvme_dma_linkListHead.Flink;
+				PLIST_ENTRY pLink = pdx->winnvme_dma_linkListHead.Flink;
 
 				while (pLink)
 				{
@@ -1845,12 +1855,6 @@ NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 								FALSE
 							);
 
-							//DbgPrint("Unmap user virtual address 0x%p, size %u\n", pMapInfo->pvu, pMapInfo->memSize);
-							//delete matched element from the list
-							//if (pLink == pdx->lstDMAMapInfo.Next)
-							//	pdx->lstDMAMapInfo.Next = pLink->Next;	//delete head elememt
-							//else
-							//	pPrevLink->Next = pLink->Next;
 							pdx->winnvme_dma_locker.Lock();
 							RemoveEntryList(&pDmaMapInfo->ListEntry);
 							pdx->winnvme_dma_locker.UnLock();
