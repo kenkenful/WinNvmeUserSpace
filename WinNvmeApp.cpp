@@ -13,14 +13,6 @@
 #define ACTION_EVENT "Global\\admin0"
 //#define ACTION_EVENT "admin0"
 
-typedef struct tagWINMEM
-{
-    PVOID phyAddr;			// physical Address for map
-    PVOID pvu;					// user space virtual address for unmap
-    ULONG dwSize;				// memory size to map or unmap
-    ULONG dwRegOff;		// register offset: 0-255
-    ULONG dwBytes;			// bytes to read or write
-} WINMEM, * PWINMEM;
 
 int counter = 0;
 //std::atomic<int> counter(0);
@@ -39,9 +31,6 @@ void usleep(DWORD waitTime) {
 
 }
 
-
-
-
 unsigned __stdcall isr_thread(LPVOID param)
 {
    // HANDLE handle = (HANDLE)param;
@@ -53,8 +42,10 @@ unsigned __stdcall isr_thread(LPVOID param)
     //for(int i=0; i< 2; ++i)  event[i] = OpenEvent(SYNCHRONIZE, FALSE, ACTION_EVENT);
     HANDLE    event;
     event = OpenEvent(SYNCHRONIZE, FALSE , ACTION_EVENT);
-    //if (event == NULL) std::cerr << "failure open" << std::endl;
-
+    if (event == NULL) {
+        std::cerr << "failure open" << std::endl;
+        return 1;
+    }
 
     printf("Thread Start\n");
 
@@ -81,7 +72,6 @@ unsigned __stdcall isr_thread(LPVOID param)
       else {
       
       }
-      
     }
 
     // for(int i=0; i<2; ++i)     CloseHandle(event[i]);
@@ -96,11 +86,9 @@ unsigned __stdcall print_polling(LPVOID param) {
     while (1) {
         printf("interrupt occured: %d\n", counter);
         Sleep(100);
-    
-    
+   
     }
     return 0;
-
 }
 
 
@@ -129,7 +117,6 @@ int main()
     if (handle == INVALID_HANDLE_VALUE)
         std::cerr << "failure " << std::endl;
 
-
 #if 1
     UINT ThreadId = 0;
     HANDLE isrthread = (HANDLE)_beginthreadex(NULL, 0, isr_thread, nullptr, 0, &ThreadId);
@@ -140,8 +127,6 @@ int main()
     }
 #endif
 
-
- 
    //PVOID pVirAddr = nullptr;	//mapped virtual addr
   // WINMEM pm;
   // DWORD dwBytes = 0;
