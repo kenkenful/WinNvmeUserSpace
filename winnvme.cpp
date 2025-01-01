@@ -21,14 +21,7 @@ LONGLONG io_qid = 1;
 //KSPIN_LOCK interrupt_lock;
 
 
-typedef struct tagWINMEM
-{
-	PVOID phyAddr;			// physical Address for map
-	PVOID pvu;					// user space virtual address for unmap
-	ULONG dwSize;				// memory size to map or unmap
-	ULONG dwRegOff;		// register offset: 0-255
-	ULONG dwBytes;			// bytes to read or write
-} WINMEM, * PWINMEM;
+
 
 //Mapped memory information list
 typedef struct tagMAPINFO
@@ -104,8 +97,13 @@ typedef struct _DEVICE_EXTENSION
 	LIST_ENTRY				winnvme_dma_linkListHead;
 	FastMutex					winnvme_dma_locker;
 
-	_DMA_ADAPTER*   dmaAdapter;
-	ULONG						NumOfMappedRegister;
+	_DMA_ADAPTER* dmaAdapterAdminSQ;
+	_DMA_ADAPTER* dmaAdapterAdminCQ;
+	_DMA_ADAPTER* dmaAdapterIoSQ;
+	_DMA_ADAPTER* dmaAdapterIoCQ;
+
+	_DMA_ADAPTER*   dmaAdapterData[4096];
+	//ULONG						NumOfMappedRegister;
 
 	MEMORY					data_buffer[1024];
 
@@ -142,6 +140,8 @@ void WinNVMeUnload(IN PDRIVER_OBJECT DriverObject);
 
 NTSTATUS ReadWriteConfigSpace(IN PDEVICE_OBJECT DeviceObject, IN ULONG ReadOrWrite, // 0 for read 1 for write
 													IN PVOID Buffer, IN ULONG Offset, IN ULONG Length );
+
+void FreeDMABuffer(PDEVICE_EXTENSION pdx);
 
 extern "C"
 NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObject, IN PUNICODE_STRING pRegistryPath)
@@ -324,8 +324,15 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 	pdx->DeviceCounter = gucDeviceCounter;
 
 	pdx->adminHandle = nullptr;
-	//pdx->ioHandle = nullptr;
-	pdx->dmaAdapter = nullptr;
+	
+	pdx->dmaAdapterAdminSQ = nullptr;
+	pdx->dmaAdapterAdminCQ = nullptr;
+
+	pdx->dmaAdapterIoSQ = nullptr;
+	pdx->dmaAdapterIoCQ = nullptr;
+
+	for(int i=0; i<4096; ++i) pdx->dmaAdapterData[i] = nullptr;
+	
 
 	InitializeListHead(&pdx->winnvme_dma_linkListHead);
 	pdx->winnvme_dma_locker.Init();
@@ -342,48 +349,7 @@ NTSTATUS WinNVMeAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Phys
 		return status;
 	}
 
-	DEVICE_DESCRIPTION DeviceDescription;
-	RtlZeroMemory(&DeviceDescription, sizeof(DEVICE_DESCRIPTION));
-
-#if 0
-	DeviceDescription.Version = DEVICE_DESCRIPTION_VERSION;
-	DeviceDescription.Master = TRUE;
-	DeviceDescription.ScatterGather = TRUE;
-	DeviceDescription.Dma32BitAddresses = TRUE;
-	DeviceDescription.Dma64BitAddresses = TRUE;
-	DeviceDescription.InterfaceType = PCIBus;
-	DeviceDescription.MaximumLength = 0x10000000;
-#else
-	DeviceDescription.Version = DEVICE_DESCRIPTION_VERSION3;
-	DeviceDescription.Master = TRUE;
-	DeviceDescription.ScatterGather = TRUE;
-	DeviceDescription.IgnoreCount = TRUE;
-	DeviceDescription.DmaChannel = 0;
-	DeviceDescription.Dma32BitAddresses = TRUE;
-	DeviceDescription.Dma64BitAddresses = TRUE;
-	DeviceDescription.InterfaceType = PCIBus;
-	DeviceDescription.MaximumLength = 0x10000000;   /*  256M */
-	DeviceDescription.DmaAddressWidth = 32;
-#endif
-
-	pdx->dmaAdapter = IoGetDmaAdapter(pdx->PhyDevice, &DeviceDescription, &pdx->NumOfMappedRegister);
-
-	DbgPrint("Number of mapped Register: %d\n", pdx->NumOfMappedRegister);
-
-
-	if (!pdx->dmaAdapter) {
-		DbgPrint("Failure IoGetDmaAdapter\n");
-
-		if (pdx->NextStackDevice)
-		{
-			IoDetachDevice(pdx->NextStackDevice);
-		}
-
-		IoDeleteDevice(pdx->fdo);
-
-		return STATUS_UNSUCCESSFUL;
-	}
-
+	
 	//RtlUnicodeStringPrintf(&symLinkName, L"\\DosDevices\\WINMEM_%d", gucDeviceCounter);
 
 	swprintf(symLinkNameReal, L"%s_%d", DEVICE_SYMLINKNAME, gucDeviceCounter);
@@ -672,42 +638,175 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 
 #if  1
-		pdx->admin_cq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
-			pdx->dmaAdapter,
-			65536,
-			&pdx->admin_cq.dmaAddr,
-			FALSE
-		);
 
-		pdx->admin_sq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
-			pdx->dmaAdapter,
-			65536,
-			&pdx->admin_sq.dmaAddr,
-			FALSE
-		);
+	DEVICE_DESCRIPTION DeviceDescription;
+	RtlZeroMemory(&DeviceDescription, sizeof(DEVICE_DESCRIPTION));
 
-		pdx->io_cq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
-			pdx->dmaAdapter,
-			4096,
-			&pdx->io_cq.dmaAddr,
-			FALSE
-		);
+#if 0
+	DeviceDescription.Version = DEVICE_DESCRIPTION_VERSION;
+	DeviceDescription.Master = TRUE;
+	DeviceDescription.ScatterGather = TRUE;
+	DeviceDescription.Dma32BitAddresses = TRUE;
+	DeviceDescription.Dma64BitAddresses = TRUE;
+	DeviceDescription.InterfaceType = PCIBus;
+	DeviceDescription.MaximumLength = 0x10000000;
+#else
+	DeviceDescription.Version = DEVICE_DESCRIPTION_VERSION3;
+	DeviceDescription.Master = TRUE;
+	DeviceDescription.ScatterGather = TRUE;
+	DeviceDescription.IgnoreCount = TRUE;
+	DeviceDescription.DmaChannel = 0;
+	DeviceDescription.Dma32BitAddresses = TRUE;
+	DeviceDescription.Dma64BitAddresses = TRUE;
+	DeviceDescription.InterfaceType = PCIBus;
+	DeviceDescription.MaximumLength = 65536;
+	DeviceDescription.DmaAddressWidth = 32;
+#endif
 
-		pdx->io_sq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
-			pdx->dmaAdapter,
-			4096,
-			&pdx->io_sq.dmaAddr,
-			FALSE
-		);
+	ULONG NumOfMappedRegister;
 
-		for (int i = 0; i < 1024; ++i) {
-			pdx->data_buffer[i].pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBuffer(
-				pdx->dmaAdapter,
-				4096,
-				&pdx->data_buffer[i].dmaAddr,
-				FALSE
-			);
+	/* Allocate Admin CQ */
+	pdx->dmaAdapterAdminCQ = IoGetDmaAdapter(pdx->PhyDevice, &DeviceDescription, &NumOfMappedRegister);
+
+	if (!pdx->dmaAdapterAdminCQ) {
+		DbgPrint("Failure IoGetDmaAdapter\n");
+		FreeDMABuffer(pdx);
+		status = STATUS_UNSUCCESSFUL;
+		Irp->IoStatus.Status = status;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		return status;
+	}
+
+	pdx->admin_cq.pvk = pdx->dmaAdapterAdminCQ->DmaOperations->AllocateCommonBuffer(
+		pdx->dmaAdapterAdminCQ,
+		65536,
+		&pdx->admin_cq.dmaAddr,
+		FALSE
+	);
+
+	if (!pdx->admin_cq.pvk) {
+		DbgPrint("Failure AllocateCommonBuffer\n");
+		FreeDMABuffer(pdx);
+		status = STATUS_UNSUCCESSFUL;
+		Irp->IoStatus.Status = status;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		return status;
+	}
+
+	/* Allocate Admin SQ */
+	pdx->dmaAdapterAdminSQ = IoGetDmaAdapter(pdx->PhyDevice, &DeviceDescription, &NumOfMappedRegister);
+
+	if (!pdx->dmaAdapterAdminSQ) {
+		DbgPrint("Failure IoGetDmaAdapter\n");
+		FreeDMABuffer(pdx);
+		status = STATUS_UNSUCCESSFUL;
+		Irp->IoStatus.Status = status;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		return status;
+	}
+
+	pdx->admin_sq.pvk = pdx->dmaAdapterAdminSQ->DmaOperations->AllocateCommonBuffer(
+		pdx->dmaAdapterAdminSQ,
+		65536,
+		&pdx->admin_sq.dmaAddr,
+		FALSE
+	);
+
+	if (!pdx->admin_sq.pvk) {
+		DbgPrint("Failure AllocateCommonBuffer\n");
+		FreeDMABuffer(pdx);
+		status = STATUS_UNSUCCESSFUL;
+		Irp->IoStatus.Status = status;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		return status;
+	}
+
+	/* Allocate IO CQ */
+	DeviceDescription.MaximumLength = 4096;
+
+	pdx->dmaAdapterIoCQ = IoGetDmaAdapter(pdx->PhyDevice, &DeviceDescription, &NumOfMappedRegister);
+
+	if (!pdx->dmaAdapterIoCQ) {
+		DbgPrint("Failure IoGetDmaAdapter\n");
+		FreeDMABuffer(pdx);
+		status = STATUS_UNSUCCESSFUL;
+		Irp->IoStatus.Status = status;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		return status;
+	}
+
+	pdx->io_cq.pvk = pdx->dmaAdapterIoCQ->DmaOperations->AllocateCommonBuffer(
+		pdx->dmaAdapterIoCQ,
+		4096,
+		&pdx->io_cq.dmaAddr,
+		FALSE
+	);
+
+	if (!pdx->io_cq.pvk) {
+		DbgPrint("Failure AllocateCommonBuffer\n");
+		FreeDMABuffer(pdx);
+		status = STATUS_UNSUCCESSFUL;
+		Irp->IoStatus.Status = status;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		return status;
+	}
+
+	/* Allocate IO SQ */
+	pdx->dmaAdapterIoSQ = IoGetDmaAdapter(pdx->PhyDevice, &DeviceDescription, &NumOfMappedRegister);
+
+	if (!pdx->dmaAdapterIoSQ) {
+		DbgPrint("Failure IoGetDmaAdapter\n");
+		FreeDMABuffer(pdx);
+		status = STATUS_UNSUCCESSFUL;
+		Irp->IoStatus.Status = status;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		return status;
+	}
+
+	pdx->io_sq.pvk = pdx->dmaAdapterIoSQ->DmaOperations->AllocateCommonBuffer(
+		pdx->dmaAdapterIoSQ,
+		4096,
+		&pdx->io_sq.dmaAddr,
+		FALSE
+	);
+
+	if (!pdx->io_sq.pvk) {
+		DbgPrint("Failure AllocateCommonBuffer\n");
+		FreeDMABuffer(pdx);
+		status = STATUS_UNSUCCESSFUL;
+		Irp->IoStatus.Status = status;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		return status;
+	}
+
+	/* Allocate Data buffer */
+	for (int i = 0; i < 1024; ++i) {
+		pdx->dmaAdapterData[i] = IoGetDmaAdapter(pdx->PhyDevice, &DeviceDescription, &NumOfMappedRegister);
+		if (!pdx->dmaAdapterData[i]) {
+			DbgPrint("Failure IoGetDmaAdapter\n");
+			FreeDMABuffer(pdx);
+			status = STATUS_UNSUCCESSFUL;
+			Irp->IoStatus.Status = status;
+			IoCompleteRequest(Irp, IO_NO_INCREMENT);
+			return status;
 		}
+
+		pdx->data_buffer[i].pvk = pdx->dmaAdapterData[i]->DmaOperations->AllocateCommonBuffer(
+			pdx->dmaAdapterData[i],
+			4096,
+			&pdx->data_buffer[i].dmaAddr,
+			FALSE
+		);
+		if (!pdx->data_buffer[i].pvk) {
+			DbgPrint("Failure AllocateCommonBuffer\n");
+			FreeDMABuffer(pdx);
+			status = STATUS_UNSUCCESSFUL;
+			Irp->IoStatus.Status = status;
+			IoCompleteRequest(Irp, IO_NO_INCREMENT);
+			return status;
+		}
+
+	}
 
 #else
 		pdx->admin_cq.pvk = pdx->dmaAdapter->DmaOperations->AllocateCommonBufferEx(
@@ -804,10 +903,6 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	// Show resource from PNP Manager
 	ShowResources( translated, pdx);
 
-
-
-
-
 #if 1
 	{
 		UNICODE_STRING name;
@@ -890,10 +985,7 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 #endif
 
-
-
 #if 1
-
 	// Check bus Master
 	status = ReadWriteConfigSpace(pdx->fdo, 0, &command_reg, 4, 2);
 
@@ -937,7 +1029,6 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	 ctrl_reg->acq = pdx->admin_cq.dmaAddr.QuadPart;;
 	 ctrl_reg->asq = pdx->admin_sq.dmaAddr.QuadPart;
 
-
 	 ctrl_reg->aqa.val = aqa.val;
 
 	pdx ->admin_sq_doorbell = ctrl_reg->sq0tdbl;                                                                         // 0
@@ -960,15 +1051,9 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		DbgPrint("Waiting  controller ready\n");
 		WinNVMeDelay(1);
 	}
-
-
-
 #endif
 
-
-
 	/* Setting  Interrupt */
-#if 1
 	RtlZeroMemory(&Connect, sizeof(IO_CONNECT_INTERRUPT_PARAMETERS));
 	Connect.Version = CONNECT_MESSAGE_BASED;
 	Connect.MessageBased.ConnectionContext.InterruptObject = &pdx->InterruptObject;
@@ -1012,16 +1097,6 @@ NTSTATUS HandleStartDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 
 	}
 
-#endif
-
-
-
-
-
-
-
-
-
 #if 0
 	for (int i = 0; i < 10; ++i) {
 
@@ -1057,6 +1132,92 @@ NTSTATUS HandleQueryRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 
 }
 
+void FreeDMABuffer(PDEVICE_EXTENSION pdx) {
+
+	if (pdx->io_sq.pvk) {
+		pdx->dmaAdapterIoSQ->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapterIoSQ,
+			4096,
+			pdx->io_sq.dmaAddr,
+			pdx->io_sq.pvk,
+			FALSE
+		);
+		pdx->io_sq.pvk = nullptr;
+	}
+
+	if (pdx->dmaAdapterIoSQ != nullptr) {
+		pdx->dmaAdapterIoSQ->DmaOperations->PutDmaAdapter(pdx->dmaAdapterIoSQ);
+		pdx->dmaAdapterIoSQ = nullptr;
+	}
+
+	if (pdx->io_cq.pvk) {
+		pdx->dmaAdapterIoCQ->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapterIoCQ,
+			4096,
+			pdx->io_cq.dmaAddr,
+			pdx->io_cq.pvk,
+			FALSE
+		);
+		pdx->io_cq.pvk = nullptr;
+	}
+
+	if (pdx->dmaAdapterIoCQ != nullptr) {
+		pdx->dmaAdapterIoCQ->DmaOperations->PutDmaAdapter(pdx->dmaAdapterIoCQ);
+		pdx->dmaAdapterIoCQ = nullptr;
+	}
+
+	if (pdx->admin_sq.pvk) {
+		pdx->dmaAdapterAdminSQ->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapterAdminSQ,
+			65536,
+			pdx->admin_sq.dmaAddr,
+			pdx->admin_sq.pvk,
+			FALSE
+		);
+		pdx->admin_sq.pvk = nullptr;
+	}
+
+	if (pdx->dmaAdapterAdminSQ != nullptr) {
+		pdx->dmaAdapterAdminSQ->DmaOperations->PutDmaAdapter(pdx->dmaAdapterAdminSQ);
+		pdx->dmaAdapterAdminSQ = nullptr;
+	}
+
+	if (pdx->admin_cq.pvk) {
+		pdx->dmaAdapterAdminCQ->DmaOperations->FreeCommonBuffer(
+			pdx->dmaAdapterAdminCQ,
+			65536,
+			pdx->admin_cq.dmaAddr,
+			pdx->admin_cq.pvk,
+			FALSE
+		);
+		pdx->admin_cq.pvk = nullptr;
+	}
+
+	if (pdx->dmaAdapterAdminCQ != nullptr) {
+		pdx->dmaAdapterAdminCQ->DmaOperations->PutDmaAdapter(pdx->dmaAdapterAdminCQ);
+		pdx->dmaAdapterAdminCQ = nullptr;
+	}
+
+	for (int i = 0; i < 1024; ++i) {
+		if (pdx->data_buffer[i].pvk) {
+			pdx->dmaAdapterData[i]->DmaOperations->FreeCommonBuffer(
+				pdx->dmaAdapterData[i],
+				4096,
+				pdx->data_buffer[i].dmaAddr,
+				pdx->data_buffer[i].pvk,
+				FALSE
+			);
+			pdx->data_buffer[i].pvk = nullptr;
+		}
+
+		if (pdx->dmaAdapterData[i] != nullptr) {
+			pdx->dmaAdapterData[i]->DmaOperations->PutDmaAdapter(pdx->dmaAdapterData[i]);
+			pdx->dmaAdapterData[i] = nullptr;
+		}
+	}
+
+}
+
 NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 {
 	NTSTATUS status;
@@ -1084,6 +1245,7 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		IoDisconnectInterruptEx(&Disconnect);
 	}
 
+#if 0
 	while (!IsListEmpty(&pdx->winnvme_dma_linkListHead))
 	{
 		DbgPrint("unalloc dma \n");
@@ -1120,67 +1282,9 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		ExFreePool(pMapInfo);
 
 	}
-
-#if 1
-
-	if (pdx->io_sq.pvk) {
-		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
-			pdx->dmaAdapter,
-			4096,
-			pdx->io_sq.dmaAddr,
-			pdx->io_sq.pvk,
-			FALSE
-		);
-		pdx->io_sq.pvk = nullptr;
-	}
-
-	if (pdx->io_cq.pvk) {
-		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
-			pdx->dmaAdapter,
-			4096,
-			pdx->io_cq.dmaAddr,
-			pdx->io_cq.pvk,
-			FALSE
-		);
-		pdx->io_cq.pvk = nullptr;
-	}
-
-	if (pdx->admin_sq.pvk) {
-		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
-			pdx->dmaAdapter,
-			65536,
-			pdx->admin_sq.dmaAddr,
-			pdx->admin_sq.pvk,
-			FALSE
-		);
-		pdx->admin_sq.pvk = nullptr;
-	}
-
-	if (pdx->admin_cq.pvk) {
-		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
-			pdx->dmaAdapter,
-			65536,
-			pdx->admin_cq.dmaAddr,
-			pdx->admin_cq.pvk,
-			FALSE
-		);
-		pdx->admin_cq.pvk = nullptr;
-	}
-
-	for (int i = 0; i < 1024; ++i) {
-		if (pdx->data_buffer[i].pvk) {
-			pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
-				pdx->dmaAdapter,
-				4096,
-				pdx->data_buffer[i].dmaAddr,
-				pdx->data_buffer[i].pvk,
-				FALSE
-			);
-			pdx->data_buffer[i].pvk = nullptr;
-		}
-	}
-
 #endif
+
+	FreeDMABuffer(pdx);
 
 	if (KeGetCurrentIrql() == DISPATCH_LEVEL) {
 		DbgPrint("%s :  DISPATCH_LEVEL\n",__func__);
@@ -1189,8 +1293,6 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 		DbgPrint("%s :  PASSIVE_LEVEL\n", __func__);
 	}
 
-
-#if 1
 	if (pdx->adminHandle) {
 		DbgPrint("ZwClose\n");
 
@@ -1204,8 +1306,6 @@ NTSTATUS HandleRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	//	ZwClose(pdx->ioHandle);
 	//	pdx->ioHandle = nullptr;
 	//}
-
-#endif
 
 	if (pdx->bar0) {
 		MmUnmapIoSpace(pdx ->bar0 , pdx->bar_size);
@@ -1235,6 +1335,7 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 
 	DbgPrint("HandleStopDevice\n");
 
+#if 0
 	if (pdx->bInterruptEnable) {
 		DbgPrint("IoDisconnectInterruptEx\n");
 		pdx->bInterruptEnable = false;
@@ -1282,74 +1383,8 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 	}
 
 
-#if 1
+	FreeDMABuffer(pdx);
 
-	if (pdx->io_sq.pvk) {
-		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
-			pdx->dmaAdapter,
-			4096,
-			pdx->io_sq.dmaAddr,
-			pdx->io_sq.pvk,
-			FALSE
-		);
-		pdx->io_sq.pvk = nullptr;
-	}
-
-	if (pdx->io_cq.pvk) {
-		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
-			pdx->dmaAdapter,
-			4096,
-			pdx->io_cq.dmaAddr,
-			pdx->io_cq.pvk,
-			FALSE
-		);
-		pdx->io_cq.pvk = nullptr;
-	}
-
-	if (pdx->admin_sq.pvk) {
-		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
-			pdx->dmaAdapter,
-			65536,
-			pdx->admin_sq.dmaAddr,
-			pdx->admin_sq.pvk,
-			FALSE
-		);
-		pdx->admin_sq.pvk = nullptr;
-	}
-
-	if (pdx->admin_cq.pvk) {
-		pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
-			pdx->dmaAdapter,
-			65536,
-			pdx->admin_cq.dmaAddr,
-			pdx->admin_cq.pvk,
-			FALSE
-		);
-		pdx->admin_cq.pvk = nullptr;
-	}
-
-	for (int i = 0; i < 1024; ++i) {
-		if (pdx->data_buffer[i].pvk) {
-			pdx->dmaAdapter->DmaOperations->FreeCommonBuffer(
-				pdx->dmaAdapter,
-				4096,
-				pdx->data_buffer[i].dmaAddr,
-				pdx->data_buffer[i].pvk,
-				FALSE
-			);
-			pdx->data_buffer[i].pvk = nullptr;
-		}
-	}
-
-	if (pdx->dmaAdapter != nullptr) {
-		(*pdx->dmaAdapter->DmaOperations->PutDmaAdapter)(pdx->dmaAdapter);
-		//pdx->dmaAdapter->DmaOperations->PutDmaAdapter(pdx->dmaAdapter);
-		pdx->dmaAdapter = nullptr;
-	}
-
-#endif
-
-#if 1
 	if (pdx->adminHandle) {
 		DbgPrint("ZwClose\n");
 
@@ -1364,33 +1399,29 @@ NTSTATUS HandleStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
 	//	pdx->ioHandle = nullptr;
 	//}
 
-#endif
-
 	if (pdx->bar0) {
 		MmUnmapIoSpace(pdx->bar0, pdx->bar_size);
 		DbgPrint("MmUnmapIoSpace\n");
 	}
+#endif
 
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	return DefaultPnpHandler(pdx, Irp);      /* 下位ドライバーへ処理の依頼  */
 }
 
 NTSTATUS HandleQueryStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp) {
-	UNREFERENCED_PARAMETER(Irp);
 	DbgPrint("HandleQueryStopDevice\n");
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	return  DefaultPnpHandler(pdx, Irp);
 }
 
 NTSTATUS HandleReadConfig(PDEVICE_EXTENSION pdx, PIRP Irp) {
-	UNREFERENCED_PARAMETER(Irp);
 	DbgPrint("HandleReadConfig\n");
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	return  DefaultPnpHandler(pdx, Irp);
 }
 
 NTSTATUS HandleWriteConfig(PDEVICE_EXTENSION pdx, PIRP Irp) {
-	UNREFERENCED_PARAMETER(Irp);
 	DbgPrint("HandleWriteConfig\n");
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	return  DefaultPnpHandler(pdx, Irp);
@@ -1398,7 +1429,6 @@ NTSTATUS HandleWriteConfig(PDEVICE_EXTENSION pdx, PIRP Irp) {
 }
 
 NTSTATUS HandleSupriseRemoval(PDEVICE_EXTENSION pdx, PIRP Irp) {
-	UNREFERENCED_PARAMETER(Irp);
 	DbgPrint("HandleSupriseRemoval\n");
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	return  DefaultPnpHandler(pdx, Irp);
@@ -1620,6 +1650,7 @@ NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 		dwIoCtlCode = irpStack->Parameters.DeviceIoControl.IoControlCode;
 
 		switch (dwIoCtlCode) {
+#if 0
 		case IOCTL_WINNVME_MAP:
 
 			if (dwInBufLen == sizeof(WINMEM) && dwOutBufLen == sizeof(PVOID))
@@ -1877,7 +1908,7 @@ NTSTATUS WinNVMeDeviceControl(IN PDEVICE_OBJECT fdo, IN PIRP irp)
 				irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
 
 			break;
-
+#endif
 		case IOCTL_WINNVME_TEST:
 			
 			cid = pdx->admin_sq_tail;

@@ -7,3 +7,12 @@
 #define	IOCTL_WINNVME_ALLOCATE_DMA_MEMORY			CTL_CODE(FILE_DEVICE_WINNVME, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define	IOCTL_WINNVME_UNALLOCATE_DMA_MEMORY	CTL_CODE(FILE_DEVICE_WINNVME, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define	IOCTL_WINNVME_TEST													CTL_CODE(FILE_DEVICE_WINNVME, 0x804,	METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
+
+typedef struct tagWINMEM
+{
+	PVOID phyAddr;			// physical Address for map
+	PVOID pvu;					// user space virtual address for unmap
+	ULONG dwSize;				// memory size to map or unmap
+	ULONG dwRegOff;		// register offset: 0-255
+	ULONG dwBytes;			// bytes to read or write
+} WINMEM, * PWINMEM;
